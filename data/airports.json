@@ -1,0 +1,20 @@
+{
+  "TLS": {
+    "icao": "LFBO",
+    "iata": "TLS",
+    "name": "Toulouse\u2013Blagnac",
+    "site": "Airbus Toulouse (final assembly: A320, A330, A350; HQ flight test centre)",
+    "lat": 43.6293,
+    "lon": 1.3638,
+    "tz": "Europe/Paris"
+  },
+  "XFW": {
+    "icao": "EDHI",
+    "iata": "XFW",
+    "name": "Hamburg-Finkenwerder",
+    "site": "Airbus Hamburg (final assembly: A320 family; A320/A321 cabin fit-out, A380 cabin & delivery, historically)",
+    "lat": 53.5358,
+    "lon": 9.8356,
+    "tz": "Europe/Berlin"
+  }
+}
