@@ -1,0 +1,165 @@
+name: Automatic Airbus Test Flights Update
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-flights
+  cancel-in-progress: false
+  # Don't cancel a run that's mid-fetch (would waste API calls and could
+  # leave the store half-written); just let any queued run wait instead.
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Compute yesterday's UTC date
+        id: date
+        run: echo "value=$(date -u -d 'yesterday' +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Retry any previously incomplete date still in the window
+        working-directory: airbus-test-flights-integrated
+        env:
+          OPENSKY_CLIENT_ID: ${{ secrets.OPENSKY_CLIENT_ID }}
+          OPENSKY_CLIENT_SECRET: ${{ secrets.OPENSKY_CLIENT_SECRET }}
+        run: |
+          python3 - <<'EOF'
+          import json, os, subprocess, sys
+          store_path = "data/store.json"
+          if not os.path.exists(store_path):
+              sys.exit(0)  # first-ever run, nothing to retry yet
+          with open(store_path) as f:
+              store = json.load(f)
+          incomplete = [
+              date for date, entry in store.get("days", {}).items()
+              if entry.get("meta", {}).get("incomplete_rate_limited")
+          ]
+          if not incomplete:
+              print("No incomplete dates to retry.")
+              sys.exit(0)
+          # Retry the single oldest incomplete date only, once per day: since
+          # a rate limit stops the whole day's fetch, only one date is ever
+          # likely to be incomplete at a time in normal use, and retrying
+          # more than one risks spending today's fresh credits before
+          # yesterday's actual fetch (the step right after this one) gets a
+          # turn. A retry re-uses the date's cached candidates -- no
+          # /flights/* calls, just whichever /tracks/all calls didn't
+          # complete last time.
+          retry_date = sorted(incomplete)[0]
+          print(f"Retrying incomplete date: {retry_date}")
+          subprocess.run(
+              ["python3", "fetch_day.py", retry_date, "-o", store_path],
+              check=True,
+          )
+          EOF
+
+      - name: Fetch yesterday and prune to a 14-day window
+        working-directory: airbus-test-flights-integrated
+        env:
+          OPENSKY_CLIENT_ID: ${{ secrets.OPENSKY_CLIENT_ID }}
+          OPENSKY_CLIENT_SECRET: ${{ secrets.OPENSKY_CLIENT_SECRET }}
+        run: |
+          python3 fetch_day.py "${{ steps.date.outputs.value }}" \
+            -o data/store.json \
+            --keep-days 14
+
+      - name: Build the embeddable fragment
+        working-directory: airbus-test-flights-integrated
+        run: |
+          python3 build/make_fragment.py data/store.json \
+            -o fragment.html \
+            --widget-id airbus-test-flights
+
+      - name: Sanity-check the result before committing
+        working-directory: airbus-test-flights-integrated
+        env:
+          FETCHED_DATE: ${{ steps.date.outputs.value }}
+        run: |
+          python3 - <<'EOF'
+          import json, os, sys
+          fetched_date = os.environ["FETCHED_DATE"]
+          with open("data/store.json") as f:
+              store = json.load(f)
+          days = store.get("days", {})
+          total_trips = sum(len(d.get("trips", [])) for d in days.values())
+          incomplete = [
+              date for date, entry in days.items()
+              if entry.get("meta", {}).get("incomplete_rate_limited")
+          ]
+          print(f"Store has {len(days)} date(s), {total_trips} trip(s) total.")
+          print(f"This run fetched: {fetched_date}")
+          if incomplete:
+              print(
+                  f"NOTE: {len(incomplete)} date(s) hit a credit limit and are "
+                  f"incomplete: {', '.join(sorted(incomplete))}. This is common "
+                  "if OpenSky's daily credits for this account were already "
+                  "partly used today (manual testing, another run, etc.) -- it "
+                  "does not block committing; an incomplete date keeps filling "
+                  "in on a future run for as long as it stays inside the "
+                  "14-day window."
+              )
+          if len(days) == 0:
+              sys.exit("Store is empty -- refusing to commit.")
+          if fetched_date in incomplete and total_trips == 0:
+              sys.exit(
+                  f"Today's fetch ({fetched_date}) was credit-limited and the "
+                  "whole store has zero trips -- can't tell a genuinely quiet "
+                  "stretch apart from an exhausted account yet. Refusing to "
+                  "commit; try again after credits reset."
+              )
+          if total_trips == 0:
+              sys.exit(
+                  "No trips in any stored date, with no credit-limit flag on "
+                  "today's fetch -- likely a fetch or classification problem "
+                  "rather than a genuinely quiet stretch. Refusing to commit; "
+                  "check the fetch step's logs above."
+              )
+          EOF
+
+      - name: Commit updated data and fragment
+        working-directory: airbus-test-flights-integrated
+        env:
+          FETCHED_DATE: ${{ steps.date.outputs.value }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/store.json fragment.html
+          if git diff --cached --quiet; then
+            echo "No changes (store and fragment already up to date)."
+          else
+            git commit -m "Add ${FETCHED_DATE} to Airbus test flights (rolling 14-day window)"
+            git push
+          fi
+
+      - name: Push fragment to clintjb.github.io
+        working-directory: airbus-test-flights-integrated
+        env:
+          PERSONAL_ACCESS_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+        run: |
+          git clone https://x-access-token:${PERSONAL_ACCESS_TOKEN}@github.com/clintjb/clintjb.github.io.git target_repo
+
+          cp fragment.html target_repo/_includes/airbus_test_flights.html
+
+          cd target_repo
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add _includes/airbus_test_flights.html
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Update Airbus test flights dashboard"
+            git push
+          fi
