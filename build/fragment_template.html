@@ -179,11 +179,14 @@
   const synthNote = flightsMeta.synthetic
     ? ' &mdash; placeholder/synthetic data for testing, not real flights.'
     : '';
+  const emptyNote = (!trips.length && !flightsMeta.synthetic)
+    ? ' <i>No matching flights were recorded in this period.</i>'
+    : '';
   $('headerSub').innerHTML =
     rangeLabel + '. Test, production-acceptance and customer-acceptance flights ' +
     'identified by <b>F-W</b> provisional registrations and <b>AIB</b> callsigns, plus ' +
     'the <b>Beluga</b> cargo shuttle fleet (<b>F-GST</b>/<b>F-GXL</b> registrations, ' +
-    '<b>BGA</b> callsigns).' + synthNote;
+    '<b>BGA</b> callsigns).' + synthNote + emptyNote;
   $('footerNote').textContent =
     'Space bar toggles playback when this widget is focused. Drag the scrubber to jump to a time. ' +
     'Times are UTC across both sites.';
