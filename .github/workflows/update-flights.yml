@@ -116,12 +116,27 @@ jobs:
                   "commit; try again after credits reset."
               )
           if total_trips == 0:
-              sys.exit(
-                  "No trips in any stored date, with no credit-limit flag on "
-                  "today's fetch -- likely a fetch or classification problem "
-                  "rather than a genuinely quiet stretch. Refusing to commit; "
-                  "check the fetch step's logs above."
+              total_candidates = sum(
+                  len(d.get("meta", {}).get("candidates") or [])
+                  for d in days.values()
               )
+              if total_candidates == 0:
+                  # The airport queries succeeded and simply found no
+                  # matching flights (e.g. a weekend, or a store that only
+                  # holds one quiet day so far). That's a real result, not
+                  # a failure -- commit it.
+                  print(
+                      "No matching flights found in any stored date, and no "
+                      "credit limit was hit -- treating this as a genuinely "
+                      "quiet stretch and committing."
+                  )
+              else:
+                  sys.exit(
+                      f"{total_candidates} candidate flight(s) were matched "
+                      "but none produced a track -- likely a track-fetch "
+                      "problem rather than a quiet stretch. Refusing to "
+                      "commit; check the fetch step's logs above."
+                  )
           EOF
 
       - name: Commit updated data and fragment
@@ -154,6 +169,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "Update Airbus Flights"
+            git commit -m "Update Airbus Test / Beluga Flights"
             git push
           fi
