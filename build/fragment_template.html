@@ -10,6 +10,8 @@
     --atf-line: #e2e5eb;
     --atf-tls: #1c64f2;
     --atf-xfw: #d9480f;
+    --atf-flight: #1c64f2;
+    --atf-beluga: #2dbc94;
 
     box-sizing: border-box;
     background: var(--atf-bg);
@@ -131,8 +133,8 @@
       <select class="atf-speed" data-atf="speed"></select>
     </div>
     <div class="atf-legend">
-      <span><i class="atf-swatch" style="background:var(--atf-tls)"></i>Toulouse Flights</span>
-      <span><i class="atf-swatch" style="background:var(--atf-xfw)"></i>Hamburg Flights</span>
+      <span><i class="atf-swatch" style="background:var(--atf-flight)"></i>Test Flights</span>
+      <span><i class="atf-swatch" style="background:var(--atf-beluga)"></i>Beluga Flights</span>
     </div>
   </div>
 
@@ -153,6 +155,11 @@
     return getComputedStyle(root).getPropertyValue(name).trim();
   }
   const siteColor = { TLS: getCss('--atf-tls'), XFW: getCss('--atf-xfw') };
+  const flightColor = getCss('--atf-flight');
+  const belugaColor = getCss('--atf-beluga');
+  function colorForTrip(trip) {
+    return trip.purpose === 'Beluga transport' ? belugaColor : flightColor;
+  }
   const palette = {
     panelBg: getCss('--atf-panel-bg'),
     land: getCss('--atf-land'),
@@ -366,7 +373,7 @@
         if (started) {
           const [cx, cy] = project(lat, lon);
           ctx.lineTo(cx, cy);
-          ctx.strokeStyle = siteColor[site];
+          ctx.strokeStyle = colorForTrip(trip);
           ctx.globalAlpha = 0.6;
           ctx.lineWidth = 2;
           ctx.stroke();
@@ -376,7 +383,7 @@
         if (simTime >= t0 && simTime <= t1) {
           const [x, y] = project(lat, lon);
           ctx.beginPath();
-          ctx.fillStyle = siteColor[site];
+          ctx.fillStyle = colorForTrip(trip);
           ctx.arc(x, y, 3.2, 0, Math.PI * 2);
           ctx.fill();
 
