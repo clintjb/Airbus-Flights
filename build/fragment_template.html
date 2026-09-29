@@ -98,9 +98,6 @@
   #airbus-test-flights-__WIDGET_ID__ .atf-swatch {
     width: 9px; height: 9px; border-radius: 50%; display: inline-block;
   }
-  #airbus-test-flights-__WIDGET_ID__ .atf-note {
-    margin-top: 10px; font-size: 11.5px; color: var(--atf-dim); line-height: 1.5;
-  }
 
   @media (max-width: 700px) {
     #airbus-test-flights-__WIDGET_ID__ .atf-stage { flex-direction: column; }
@@ -109,18 +106,18 @@
 </style>
 
   <div class="atf-header">
-    <h3>A day of Airbus test flights</h3>
+    <h3>A Timelapse of Airbus Flights</h3>
     <div class="atf-sub" data-atf="headerSub">Loading&hellip;</div>
   </div>
 
   <div class="atf-stage">
     <div class="atf-panel">
-      <div class="atf-panel-label"><b>Toulouse&ndash;Blagnac</b> &middot; LFBO</div>
+      <div class="atf-panel-label"><b>Toulouse&ndash;Blagnac</b> &middot; TLS</div>
       <div class="atf-count" data-atf="count-TLS"></div>
       <canvas data-atf="canvas-TLS"></canvas>
     </div>
     <div class="atf-panel">
-      <div class="atf-panel-label"><b>Hamburg-Finkenwerder</b> &middot; EDHI</div>
+      <div class="atf-panel-label"><b>Hamburg-Finkenwerder</b> &middot; XFW</div>
       <div class="atf-count" data-atf="count-XFW"></div>
       <canvas data-atf="canvas-XFW"></canvas>
     </div>
@@ -134,10 +131,9 @@
       <select class="atf-speed" data-atf="speed"></select>
     </div>
     <div class="atf-legend">
-      <span><i class="atf-swatch" style="background:var(--atf-tls)"></i>Toulouse flights</span>
-      <span><i class="atf-swatch" style="background:var(--atf-xfw)"></i>Hamburg flights</span>
+      <span><i class="atf-swatch" style="background:var(--atf-tls)"></i>Toulouse Flights</span>
+      <span><i class="atf-swatch" style="background:var(--atf-xfw)"></i>Hamburg Flights</span>
     </div>
-    <div class="atf-note" data-atf="footerNote"></div>
   </div>
 
 <script>
@@ -173,9 +169,10 @@
   const rangeSeconds = numDays * 86400;
 
   const dateLabel = flightsMeta.date || '';
-  const rangeLabel = numDays > 1
-    ? '<b>' + numDays + ' days from ' + dateLabel + '</b>'
-    : '<b>' + dateLabel + '</b>, UTC';
+  const dmyLabel = (function(iso) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
+    return m ? (m[3] + '-' + m[2] + '-' + m[1]) : iso;
+  })(dateLabel);
   const synthNote = flightsMeta.synthetic
     ? ' &mdash; placeholder/synthetic data for testing, not real flights.'
     : '';
@@ -183,13 +180,8 @@
     ? ' <i>No matching flights were recorded in this period.</i>'
     : '';
   $('headerSub').innerHTML =
-    rangeLabel + '. Test, production-acceptance and customer-acceptance flights ' +
-    'identified by <b>F-W</b> provisional registrations and <b>AIB</b> callsigns, plus ' +
-    'the <b>Beluga</b> cargo shuttle fleet (<b>F-GST</b>/<b>F-GXL</b> registrations, ' +
-    '<b>BGA</b> callsigns).' + synthNote + emptyNote;
-  $('footerNote').textContent =
-    'Space bar toggles playback when this widget is focused. Drag the scrubber to jump to a time. ' +
-    'Times are UTC across both sites.';
+    'Data is provided since <b>' + dmyLabel + '</b> &mdash; covering Beluga, test, ' +
+    'production and customer acceptance flights.' + synthNote + emptyNote;
 
   function makePanel(site) {
     const canvas = $('canvas-' + site);
