@@ -10,7 +10,7 @@
     --atf-line: #e2e5eb;
     --atf-tls: #1c64f2;
     --atf-xfw: #d9480f;
-    --atf-flight: #1c64f2;
+    --atf-flight: #2d60bc;
     --atf-beluga: #2dbc94;
 
     box-sizing: border-box;
@@ -169,8 +169,8 @@
   const bySite = { TLS: [], XFW: [] };
   for (const t of trips) bySite[t.site].push(t);
 
-  $('count-TLS').innerHTML = '<b>' + bySite.TLS.length + '</b> flights';
-  $('count-XFW').innerHTML = '<b>' + bySite.XFW.length + '</b> flights';
+  $('count-TLS').innerHTML = '<b>' + bySite.TLS.length + '</b> Flights';
+  $('count-XFW').innerHTML = '<b>' + bySite.XFW.length + '</b> Flights';
 
   const numDays = Math.max(1, flightsMeta.days || 1);
   const rangeSeconds = numDays * 86400;
