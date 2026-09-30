@@ -101,7 +101,18 @@ AIRPORTS = {
     "XFW": {"icao": "EDHI", "lat": 53.5358, "lon": 9.8356, "name": "Hamburg-Finkenwerder"},
 }
 
-REGISTRATION_PREFIXES = ["F-W", "F-GST", "F-GXL"]
+# F-W: French provisional registration, used for airframes built/tested at
+# Toulouse before their permanent registration is assigned.
+# D-AV/D-AX/D-AZ: the equivalent German pre-delivery test registration
+# blocks used for airframes assembled at Hamburg-Finkenwerder (confirmed
+# against multiple real Finkenwerder test-flight examples, e.g. D-AVVB,
+# D-AZAE, D-AVXY, D-AVXZ). Deliberately NOT the bare "D-A" prefix: that
+# covers Germany's entire civil register, including ordinary in-service
+# aircraft (e.g. Lufthansa's own D-AIPA, or Condor's D-ANMZ, which are
+# permanent operational registrations, not test ones) -- matching on "D-A"
+# alone would pull in normal commercial Hamburg traffic, not just test
+# flights.
+REGISTRATION_PREFIXES = ["F-W", "F-GST", "F-GXL", "D-AV", "D-AX", "D-AZ"]
 CALLSIGN_PREFIXES = ["AIB", "BGA", "BCO"]
 
 # ---------------------------------------------------------------------------
@@ -417,7 +428,11 @@ def purpose_for(candidate):
         return "Beluga transport"
     if reg.startswith("F-GST") or reason.startswith("callsign:BGA") or reason.startswith("callsign:BCO"):
         return "Beluga transport"
-    if reason.startswith("registration:F-W"):
+    if reason.startswith("registration:F-W") or reason.startswith("registration:D-A"):
+        # registration:D-A here only ever means D-AV/D-AX/D-AZ, since those
+        # are the only D-A-prefixed entries in REGISTRATION_PREFIXES -- the
+        # German equivalent of F-W: a pre-delivery test registration at
+        # Hamburg-Finkenwerder, not a permanent operational one.
         return "Flight test"
     if reason.startswith("callsign:AIB"):
         return "Airbus operation"
