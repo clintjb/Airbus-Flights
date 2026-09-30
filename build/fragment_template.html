@@ -8,8 +8,6 @@
     --atf-ink: #1a1e27;
     --atf-dim: #6b7280;
     --atf-line: #e2e5eb;
-    --atf-tls: #1c64f2;
-    --atf-xfw: #d9480f;
     --atf-flight: #2d60bc;
     --atf-beluga: #2dbc94;
 
@@ -133,7 +131,7 @@
       <select class="atf-speed" data-atf="speed"></select>
     </div>
     <div class="atf-legend">
-      <span><i class="atf-swatch" style="background:var(--atf-flight)"></i>Test Flights</span>
+      <span><i class="atf-swatch" style="background:var(--atf-flight)"></i>Airbus Flights</span>
       <span><i class="atf-swatch" style="background:var(--atf-beluga)"></i>Beluga Flights</span>
     </div>
   </div>
@@ -154,7 +152,11 @@
   function getCss(name) {
     return getComputedStyle(root).getPropertyValue(name).trim();
   }
-  const siteColor = { TLS: getCss('--atf-tls'), XFW: getCss('--atf-xfw') };
+  // Flight-path color (see colorForTrip below) encodes what kind of
+  // flight it is, not which airport it's near -- the two panels already
+  // make the airport obvious, so color is free to carry a more useful
+  // distinction: ordinary Airbus operations vs. the Beluga shuttle fleet.
+  // The airport marker itself is drawn plain black (see drawStatic).
   const flightColor = getCss('--atf-flight');
   const belugaColor = getCss('--atf-beluga');
   function colorForTrip(trip) {
@@ -169,8 +171,8 @@
   const bySite = { TLS: [], XFW: [] };
   for (const t of trips) bySite[t.site].push(t);
 
-  $('count-TLS').innerHTML = '<b>' + bySite.TLS.length + '</b> Flights';
-  $('count-XFW').innerHTML = '<b>' + bySite.XFW.length + '</b> Flights';
+  $('count-TLS').innerHTML = '<b>' + bySite.TLS.length + '</b> flights';
+  $('count-XFW').innerHTML = '<b>' + bySite.XFW.length + '</b> flights';
 
   const numDays = Math.max(1, flightsMeta.days || 1);
   const rangeSeconds = numDays * 86400;
@@ -194,7 +196,6 @@
     const canvas = $('canvas-' + site);
     const ctx = canvas.getContext('2d');
     const g = geo[site];
-    const color = siteColor[site];
 
     let W = 0, H = 0, dpr = 1;
     let project = null;
@@ -266,7 +267,7 @@
       }
 
       const [ax, ay] = project(g.center[0], g.center[1]);
-      ctx.strokeStyle = color;
+      ctx.strokeStyle = '#000000';
       ctx.globalAlpha = 0.7;
       ctx.lineWidth = 1.5;
       ctx.beginPath();
