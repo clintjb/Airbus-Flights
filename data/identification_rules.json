@@ -1,5 +1,5 @@
 {
-  "_comment": "Rules for classifying an OpenSky flight as an Airbus test / production / customer-acceptance / Beluga-shuttle flight at TLS or XFW. A flight matches if ANY registration prefix OR ANY callsign prefix matches. Sources: Flightradar24 'Where Airplanes are Born' blog (AIB callsign block) and 'The Airbus Beluga ST: A Whale of a Story' blog (Beluga registrations/callsigns); standard F-W provisional-registration convention used by Airbus for all in-pipeline airframes (own test fleet AND customer aircraft prior to handover); D-A blocks historically used at Hamburg for pre-delivery A320-family aircraft.",
+  "_comment": "Rules for classifying an OpenSky flight as an Airbus test / production / customer-acceptance / Beluga-shuttle flight at TLS or XFW. A flight matches if ANY registration prefix OR ANY callsign prefix matches. Sources: Flightradar24 'Where Airplanes are Born' blog (AIB callsign block) and 'The Airbus Beluga ST: A Whale of a Story' blog (Beluga registrations/callsigns); standard F-W provisional-registration convention used by Airbus for all in-pipeline airframes (own test fleet AND customer aircraft prior to handover); D-AV/D-AX/D-AZ sub-blocks used at Hamburg-Finkenwerder for the equivalent pre-delivery test registration on A320-family aircraft, confirmed against real jetphotos.com/aussieairliners.org test-flight records -- deliberately not the bare 'D-A' prefix, which would also match ordinary in-service German-registered aircraft.",
 
   "registration_prefixes": [
     {
@@ -16,6 +16,21 @@
       "prefix": "F-GXL",
       "label": "BelugaXL registration block",
       "notes": "The six BelugaXL (A330-743L) aircraft, e.g. F-GXLG (final one delivered). Same rationale as F-GST -- permanently registered, not F-W."
+    },
+    {
+      "prefix": "D-AV",
+      "label": "German pre-delivery test registration (Hamburg-Finkenwerder), A320-family block",
+      "notes": "The German equivalent of F-W: a temporary registration worn during test/acceptance flights at Hamburg before the aircraft is re-registered to its customer. Confirmed against multiple real Finkenwerder test flights (e.g. D-AVVB/IndiGo, D-AVXZ/Air New Zealand), each also carrying an AIB callsign. Deliberately NOT the bare 'D-A' prefix -- that covers the whole German civil register, including permanently-registered in-service aircraft (e.g. Lufthansa's D-AIPA, Condor's D-ANMZ), which would be a false-positive flood."
+    },
+    {
+      "prefix": "D-AX",
+      "label": "German pre-delivery test registration (Hamburg-Finkenwerder)",
+      "notes": "Same rationale and sub-block as D-AV; confirmed against real examples (e.g. D-AXAR, D-AXAD)."
+    },
+    {
+      "prefix": "D-AZ",
+      "label": "German pre-delivery test registration (Hamburg-Finkenwerder)",
+      "notes": "Same rationale and sub-block as D-AV; confirmed against real examples (e.g. D-AZAE, D-AZAQ)."
     }
   ],
 
@@ -48,7 +63,8 @@
   "known_test_fleet_examples": [
     {"reg": "F-WWOW", "type": "A350-900", "role": "Airbus development aircraft, long-term"},
     {"reg": "F-WXLD", "type": "A350F", "role": "Airbus development aircraft, freighter certification"},
-    {"reg": "F-WULR", "type": "A350-1000ULR", "role": "Airbus development aircraft, ultra-long-range test"}
+    {"reg": "F-WULR", "type": "A350-1000ULR", "role": "Airbus development aircraft, ultra-long-range test"},
+    {"reg": "D-AVXZ", "type": "A320neo-family", "role": "Real Hamburg-Finkenwerder pre-delivery test example (2025): built for Air New Zealand, test-flown as AIB593A/B and AIB913C, delivered as ZK-NNI"}
   ],
 
   "known_beluga_fleet": [
@@ -57,8 +73,14 @@
     {"reg": "F-GSTC", "type": "A300-600ST Beluga", "role": "Beluga #3"},
     {"reg": "F-GSTD", "type": "A300-600ST Beluga", "role": "Beluga #4"},
     {"reg": "F-GSTF", "type": "A300-600ST Beluga", "role": "Beluga #5"},
-    {"reg": "F-GXLG", "type": "A330-743L BelugaXL", "role": "Final BelugaXL delivered, May 2024"}
+	{"reg": "F-GXLG", "type": "A330-743L BelugaXL", "role": "BelugaXL #1 -- test airframe; entered service May 2024"},
+    {"reg": "F-GXLH", "type": "A330-743L BelugaXL", "role": "BelugaXL #2 -- active service"},
+    {"reg": "F-GXLI", "type": "A330-743L BelugaXL", "role": "BelugaXL #3 -- active service"},
+    {"reg": "F-GXLJ", "type": "A330-743L BelugaXL", "role": "BelugaXL #4 -- active service"},
+    {"reg": "F-GXLN", "type": "A330-743L BelugaXL", "role": "BelugaXL #5 -- active service"},
+    {"reg": "F-GXLO", "type": "A330-743L BelugaXL", "role": "BelugaXL #6 -- active service"}
   ],
+  
 
   "exclusions": {
     "airports_only": ["LFBO", "EDHI"],
