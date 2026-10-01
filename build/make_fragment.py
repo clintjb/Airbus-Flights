@@ -18,6 +18,9 @@ Usage:
     # Just one date:
     python3 build/make_fragment.py data/store.json --from 2026-12-09 --to 2026-12-09 -o fragment.html
 
+(The GitHub Actions workflow runs this for you and copies the result into
+the site repo -- see README.md.)
+
 Then in your Jekyll post/markdown file, either:
   (a) paste the fragment's contents directly inline, or
   (b) save it under _includes/ and pull it in with:
@@ -89,7 +92,11 @@ def main():
         print(f"Note: {len(missing)} date(s) in the requested range aren't in "
               f"the store yet, skipping: {', '.join(missing)}")
 
-    num_days = len(selected)
+    # The animation covers the whole calendar SPAN, not just the dates that
+    # happen to be in the store. Counting only stored dates broke playback
+    # whenever a day was missing in the middle (later days fell past the end
+    # of the timeline and never played).
+    num_days = len(wanted)
     range_start_ts = int(
         datetime.strptime(selected[0], "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp()
     )
@@ -102,7 +109,7 @@ def main():
         entry_meta = entry.get("meta", {})
         if entry_meta.get("synthetic"):
             any_synthetic = True
-        if entry_meta.get("incomplete_rate_limited"):
+        if entry_meta.get("incomplete_rate_limited") or entry_meta.get("complete") is False:
             any_incomplete = True
         for trip in entry.get("trips", []):
             # Store holds absolute UTC epoch seconds; the fragment template
@@ -129,7 +136,10 @@ def main():
     widget_id = args.widget_id or uuid.uuid4().hex[:8]
 
     data = {"geo": geo, "flights": flights}
-    data_js = json.dumps(data, separators=(",", ":"))
+    # The data is inlined inside a <script> element, so make sure no string
+    # can ever close it (or open an HTML comment) early.
+    data_js = (json.dumps(data, separators=(",", ":"))
+               .replace("</", "<\\/").replace("<!--", "<\\!--"))
 
     with open(args.template) as f:
         template = f.read()
@@ -144,7 +154,7 @@ def main():
 
     size_kb = len(out.encode()) / 1024
     print(f"Wrote {output_path} ({size_kb:.1f} KB), widget id: {widget_id}")
-    print(f"  {num_days} date(s): {', '.join(selected)}")
+    print(f"  {len(selected)} stored date(s) over a {num_days}-day span: {', '.join(selected)}")
     print(f"  {len(all_trips)} total trip(s)")
     if any_incomplete:
         print("  NOTE: at least one included date was a partial/rate-limited "

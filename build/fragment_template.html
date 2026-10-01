@@ -99,6 +99,11 @@
     width: 9px; height: 9px; border-radius: 50%; display: inline-block;
   }
 
+  #airbus-test-flights-__WIDGET_ID__ .atf-credit {
+    margin-top: 8px; font-size: 11px; line-height: 1.4; color: var(--atf-dim);
+  }
+  #airbus-test-flights-__WIDGET_ID__ .atf-credit a { color: inherit; }
+
   @media (max-width: 700px) {
     #airbus-test-flights-__WIDGET_ID__ .atf-stage { flex-direction: column; }
     #airbus-test-flights-__WIDGET_ID__ .atf-panel { height: 280px; }
@@ -134,6 +139,8 @@
       <span><i class="atf-swatch" style="background:var(--atf-flight)"></i>Airbus Flights</span>
       <span><i class="atf-swatch" style="background:var(--atf-beluga)"></i>Beluga Flights</span>
     </div>
+    <div class="atf-credit">Flight data: <a href="https://opensky-network.org" target="_blank" rel="noopener">The OpenSky Network</a>
+      &middot; Basemap: Natural Earth. Coverage is crowd-sourced, so some flights (especially low-level ones near Finkenwerder) can be missing or have gaps.</div>
   </div>
 
 <script>
@@ -168,11 +175,19 @@
     landLine: getCss('--atf-land-line'),
   };
 
+  // A flight between the two sites (a Beluga shuttle, say) is listed on BOTH
+  // maps: trip.sites holds every site it touches. Older data only has
+  // trip.site, so fall back to that.
   const bySite = { TLS: [], XFW: [] };
-  for (const t of trips) bySite[t.site].push(t);
+  for (const t of trips) {
+    for (const s of (t.sites && t.sites.length ? t.sites : [t.site])) {
+      if (bySite[s]) bySite[s].push(t);
+    }
+  }
 
-  $('count-TLS').innerHTML = '<b>' + bySite.TLS.length + '</b> flights';
-  $('count-XFW').innerHTML = '<b>' + bySite.XFW.length + '</b> flights';
+  function countLabel(n) { return '<b>' + n + '</b> flight' + (n === 1 ? '' : 's'); }
+  $('count-TLS').innerHTML = countLabel(bySite.TLS.length);
+  $('count-XFW').innerHTML = countLabel(bySite.XFW.length);
 
   const numDays = Math.max(1, flightsMeta.days || 1);
   const rangeSeconds = numDays * 86400;
@@ -215,20 +230,17 @@
 
     function buildProjection() {
       const [aLat, aLon] = g.center;
-      const zoom = 3.45;
-      const minLon = aLon - zoom, maxLon = aLon + zoom;
-      const minLat = aLat - zoom * 0.72, maxLat = aLat + zoom * 0.72;
+      // One degree of longitude is shorter than one of latitude by cos(lat).
+      // Without this correction the map is stretched sideways -- badly so at
+      // Hamburg (53.5N, ~68% too wide) -- and flight paths look distorted.
+      const k = Math.cos(aLat * Math.PI / 180);
+      const halfW = 2.9, halfH = 2.3;   // visible half-extent, in degrees of latitude
       const padPx = 24;
-      const sx = (W - padPx * 2) / (maxLon - minLon);
-      const sy = (H - padPx * 2) / (maxLat - minLat);
-      const s = Math.min(sx, sy);
-      const offX = (W - (maxLon - minLon) * s) / 2;
-      const offY = (H - (maxLat - minLat) * s) / 2;
-      project = (lat, lon) => {
-        const x = offX + (lon - minLon) * s;
-        const y = H - (offY + (lat - minLat) * s);
-        return [x, y];
-      };
+      const s = Math.min((W - padPx * 2) / (2 * halfW), (H - padPx * 2) / (2 * halfH));
+      project = (lat, lon) => [
+        W / 2 + (lon - aLon) * k * s,
+        H / 2 - (lat - aLat) * s,
+      ];
     }
 
     function drawStatic() {
@@ -276,7 +288,7 @@
       ctx.globalAlpha = 1;
     }
 
-    window.addEventListener('resize', resize);
+    window.addEventListener('resize', () => { resize(); if (typeof drawFrame === 'function') drawFrame(); });
     resize();
 
     return {
@@ -393,8 +405,12 @@
           const label = [trip.callsign || 'Unknown', trip.model || 'Aircraft', trip.purpose || 'Airbus operation'].join(' · ');
           ctx.font = '11px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
           ctx.textBaseline = 'middle';
-          const padX = 5, labelX = x + 7, labelY = y - 8;
+          const padX = 5;
           const width = ctx.measureText(label).width;
+          const cw = ctx.canvas.clientWidth;
+          // keep the label on the canvas near the edges
+          const labelX = Math.max(padX + 2, Math.min(x + 7, cw - width - padX - 2));
+          const labelY = Math.max(10, y - 8);
           ctx.fillStyle = 'rgba(15, 18, 24, 0.78)';
           ctx.fillRect(labelX - padX, labelY - 8, width + padX * 2, 16);
           ctx.fillStyle = '#e8ebf0';
@@ -406,7 +422,17 @@
     scrubber.value = Math.floor(simTime);
   }
 
+  // Don't burn CPU animating a widget that is scrolled out of view.
+  let onScreen = true;
+  if ('IntersectionObserver' in window) {
+    new IntersectionObserver((entries) => {
+      onScreen = entries[entries.length - 1].isIntersecting;
+      if (onScreen) lastFrame = null;
+    }).observe(root);
+  }
+
   function tick(ts) {
+    if (!onScreen) { lastFrame = null; requestAnimationFrame(tick); return; }
     if (playing) {
       if (lastFrame != null) {
         const dt = (ts - lastFrame) / 1000;
@@ -426,7 +452,12 @@
     playBtn.innerHTML = playing ? '&#9654;' : '&#10074;&#10074;';
   });
   root.addEventListener('keydown', (e) => {
-    if (e.code === 'Space') { e.preventDefault(); playBtn.click(); }
+    // Let the button, speed menu and slider keep their own Space behaviour;
+    // handling it here as well made the button toggle twice.
+    const tag = e.target && e.target.tagName;
+    if (e.code === 'Space' && tag !== 'BUTTON' && tag !== 'SELECT' && tag !== 'INPUT') {
+      e.preventDefault(); playBtn.click();
+    }
   });
   scrubber.addEventListener('input', () => {
     simTime = Number(scrubber.value);

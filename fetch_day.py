@@ -7,10 +7,9 @@ JSON store, keyed by date -- so you can build up a week's worth of data
 over several separate runs (e.g. one per day, to stay within OpenSky's
 daily credit limits) rather than needing it all in one sitting.
 
-This is NOT part of any automated pipeline. Run it yourself, by hand,
-whenever you want to add a day. It talks to the OpenSky Network API,
-merges that day into the store file, and does nothing else. You then
-commit the store file to your Jekyll repo yourself.
+Run it by hand to add a day, or let the GitHub Actions workflow
+(.github/workflows/update-flights.yml) call it on a schedule. It talks to
+the OpenSky Network API and merges that day into the store file.
 
 ------------------------------------------------------------------------
 Usage
@@ -47,6 +46,11 @@ Usage
     # See what's currently in the store without fetching anything:
     python3 fetch_day.py --list -o data/store.json
 
+    # Finish / refresh any stored date that is incomplete or whose airport
+    # query ran before OpenSky's nightly processing had settled (this is
+    # what the workflow runs before fetching "yesterday"):
+    python3 fetch_day.py --revisit -o data/store.json
+
 ------------------------------------------------------------------------
 Why one date per run, run by hand
 ------------------------------------------------------------------------
@@ -79,7 +83,9 @@ A flight counts if ANY of:
     callsigns like the test/delivery fleet does, so they need their own
     rule to be picked up at all)
 Registration matching requires --registry (see above); without it,
-classification falls back to callsign-only matching.
+classification falls back to callsign-only matching. The prefixes are read
+from data/identification_rules.json (single source of truth); the constants
+below are only a fallback if that file is missing.
 
 Output is scoped to LFBO and EDHI departures/arrivals only.
 """
@@ -95,6 +101,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 AIRPORTS = {
     "TLS": {"icao": "LFBO", "lat": 43.6293, "lon": 1.3638, "name": "Toulouse-Blagnac"},
@@ -112,8 +119,45 @@ AIRPORTS = {
 # permanent operational registrations, not test ones) -- matching on "D-A"
 # alone would pull in normal commercial Hamburg traffic, not just test
 # flights.
-REGISTRATION_PREFIXES = ["F-W", "F-GST", "F-GXL", "D-AV", "D-AX", "D-AZ"]
-CALLSIGN_PREFIXES = ["AIB", "BGA", "BCO"]
+_DEFAULT_REGISTRATION_PREFIXES = ["F-W", "F-GST", "F-GXL", "D-AV", "D-AX", "D-AZ"]
+_DEFAULT_CALLSIGN_PREFIXES = ["AIB", "BGA", "BCO"]
+RULES_PATH = Path(__file__).resolve().parent / "data" / "identification_rules.json"
+
+
+def _load_rules():
+    """Prefixes from data/identification_rules.json, so the documented rules
+    and the code that applies them cannot drift apart."""
+    try:
+        with open(RULES_PATH, encoding="utf-8") as f:
+            rules = json.load(f)
+        regs = [r["prefix"].upper() for r in rules["registration_prefixes"]]
+        calls = [r["prefix"].upper() for r in rules["callsign_prefixes"]]
+        if regs and calls:
+            return regs, calls
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        print(f"WARNING: could not read {RULES_PATH} ({e}); using built-in rules.",
+              file=sys.stderr)
+    return list(_DEFAULT_REGISTRATION_PREFIXES), list(_DEFAULT_CALLSIGN_PREFIXES)
+
+
+REGISTRATION_PREFIXES, CALLSIGN_PREFIXES = _load_rules()
+
+# A site counts as "involved" in a flight if the flown track starts or ends
+# within this distance of the airport. OpenSky's estimated departure/arrival
+# airport is often missing for low-level ADS-B coverage (a known weakness at
+# Finkenwerder), so the track itself is the more reliable evidence.
+ENDPOINT_RADIUS_KM = 8.0
+# Two records of the same aircraft starting within this many seconds are the
+# same flight (OpenSky's departure- and arrival-side records for one flight
+# can differ by several seconds, which defeated exact-match de-duplication).
+DUPLICATE_WINDOW_SECONDS = 300
+# Tracks that never move further than this from their first point are ground
+# movements (engine runs, taxi tests), not flights.
+MIN_FLIGHT_EXTENT_KM = 2.0
+# OpenSky processes /flights data in a nightly batch. A candidate list taken
+# soon after midnight can be partial, so it is refreshed once more later.
+CANDIDATE_SETTLE_HOURS = 12
+MAX_TRACK_ATTEMPTS = 3
 
 # ---------------------------------------------------------------------------
 # OpenSky credentials -- fill these in directly if running this locally only.
@@ -354,6 +398,35 @@ def classify(callsign, registration):
 MAX_FLIGHTS_WINDOW_SECONDS = int(1.9 * 86400)
 
 
+def haversine_km(lat1, lon1, lat2, lon2):
+    r = 6371.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp, dl = p2 - p1, math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(min(1.0, math.sqrt(a)))
+
+
+def sites_near(lat, lon):
+    """Sites whose airport is within ENDPOINT_RADIUS_KM of a point."""
+    return [site for site, ap in AIRPORTS.items()
+            if haversine_km(lat, lon, ap["lat"], ap["lon"]) <= ENDPOINT_RADIUS_KM]
+
+
+def path_extent_km(path):
+    """Furthest distance any track point gets from the first point."""
+    lat0, lon0 = path[0][1], path[0][2]
+    return max(haversine_km(lat0, lon0, p[1], p[2]) for p in path)
+
+
+def merge_sites(*lists):
+    out = []
+    for lst in lists:
+        for s in lst or []:
+            if s and s not in out:
+                out.append(s)
+    return out
+
+
 def fetch_site_flights(client, icao, begin_ts, end_ts):
     all_flights = {}
     chunks = chunk_range(begin_ts, end_ts, MAX_FLIGHTS_WINDOW_SECONDS)
@@ -374,10 +447,36 @@ def candidate_key(f):
     return f"{(f.get('icao24') or '').strip().lower()}-{int(f.get('firstSeen') or 0)}"
 
 
+def dedupe_candidates(cands, prefer_keys=frozenset()):
+    """Merge records that describe the same flight.
+
+    OpenSky returns a flight between two of our airports from BOTH airports'
+    queries, and the two records can differ by a few seconds in firstSeen, so
+    an exact (icao24, firstSeen) match is not enough. Records of the same
+    aircraft starting within DUPLICATE_WINDOW_SECONDS are merged and the
+    merged flight belongs to every site involved. `prefer_keys` (already
+    checked candidates) win, so a track is never fetched twice.
+    """
+    out = []
+    for c in sorted(cands, key=lambda c: (c["icao24"], c["firstSeen"])):
+        prev = out[-1] if out else None
+        if (prev and prev["icao24"] == c["icao24"]
+                and abs(c["firstSeen"] - prev["firstSeen"]) <= DUPLICATE_WINDOW_SECONDS):
+            sites = merge_sites(prev.get("sites") or [prev["site"]],
+                                c.get("sites") or [c["site"]])
+            keep = c if (c["key"] in prefer_keys and prev["key"] not in prefer_keys) else prev
+            keep["sites"] = sites
+            keep["site"] = sites[0]
+            out[-1] = keep
+        else:
+            out.append(c)
+    return sorted(out, key=lambda c: c["firstSeen"])
+
+
 def find_candidates(client, date_str, registry):
     begin_ts, end_ts = day_bounds_utc(date_str)
-    candidates = []
-    seen = set()
+    icao_to_site = {ap["icao"]: site for site, ap in AIRPORTS.items()}
+    raw = []
 
     for site, ap in AIRPORTS.items():
         flights = fetch_site_flights(client, ap["icao"], begin_ts, end_ts)
@@ -386,23 +485,32 @@ def find_candidates(client, date_str, registry):
             icao24 = (f.get("icao24") or "").strip().lower()
             aircraft = registry.get(icao24, {})
             reason = classify(f.get("callsign"), aircraft.get("registration"))
-            if not reason:
+            if not reason or not icao24 or not f.get("firstSeen"):
                 continue
-            key = candidate_key(f)
-            if not icao24 or not f.get("firstSeen") or key in seen:
-                continue
-            seen.add(key)
-            candidates.append({
-                "key": key,
-                "site": site,
+            # Every in-scope airport this flight touches, departure first. A
+            # TLS<->XFW shuttle belongs on BOTH maps, whichever airport's
+            # query happened to return it.
+            sites = merge_sites(
+                [icao_to_site.get(f.get("estDepartureAirport"))],
+                [icao_to_site.get(f.get("estArrivalAirport"))],
+                [site],
+            )
+            raw.append({
+                "key": candidate_key(f),
+                "site": sites[0],
+                "sites": sites,
                 "icao24": icao24,
                 "callsign": (f.get("callsign") or "").strip(),
                 "registration": aircraft.get("registration"),
                 "model": aircraft.get("model"),
                 "match_reason": reason,
                 "firstSeen": int(f["firstSeen"]),
+                "lastSeen": int(f["lastSeen"]) if f.get("lastSeen") else None,
+                "dep": f.get("estDepartureAirport"),
+                "arr": f.get("estArrivalAirport"),
             })
 
+    candidates = dedupe_candidates(raw)
     client.print_credit_status(prefix="  ")
     return candidates
 
@@ -411,7 +519,7 @@ def print_candidates(candidates):
     print(f"Matched {len(candidates)} candidate flights:", file=sys.stderr)
     for f in candidates:
         print(
-            f"    {f['site']}  icao24={f['icao24']}  "
+            f"    {'+'.join(f.get('sites') or [f['site']])}  icao24={f['icao24']}  "
             f"callsign={f['callsign'] or '(none)'}  "
             f"registration={f['registration'] or '(unknown)'}  "
             f"model={f.get('model') or '(unknown)'}  "
@@ -420,92 +528,78 @@ def print_candidates(candidates):
         )
 
 
-def purpose_for(candidate):
+BELUGA_CALLSIGN_PREFIXES = ("BGA", "BCO")
+
+# icao24 hex codes of the BelugaXL fleet. Used when no --registry file was
+# supplied, so the label still says "BelugaXL" rather than "Aircraft".
+#
+# The tail letter of the BGA callsign matches the registration's last letter
+# for every one of these codes seen in the stored data (e.g. BGA113N, BGA138N
+# and BGA183N all use 395d6d; "I" is written "Y", as in BGA212Y/BGA243Y for
+# 395d68). That gives the mapping below. 395d6e has not been seen in the data
+# yet and is inferred from the sequence.
+#   395d66 F-GXLG   395d67 F-GXLH   395d68 F-GXLI
+#   395d69 F-GXLJ   395d6d F-GXLN   395d6e F-GXLO
+# It is kept as a set (not a registration map) because registration is never
+# displayed and a --registry file, when present, takes priority anyway.
+KNOWN_BELUGAXL_ICAO24 = {"395d66", "395d67", "395d68", "395d69", "395d6d", "395d6e"}
+
+
+def is_beluga(rec):
+    reg = (rec.get("registration") or "").upper()
+    call = (rec.get("callsign") or "").upper()
+    icao24 = (rec.get("icao24") or "").lower()
+    return (reg.startswith(("F-GXL", "F-GST"))
+            or call.startswith(BELUGA_CALLSIGN_PREFIXES)
+            or icao24 in KNOWN_BELUGAXL_ICAO24)
+
+
+def purpose_for(rec):
     """A deliberately high-level description based on the identification rule."""
-    reason = candidate.get("match_reason", "")
-    reg = (candidate.get("registration") or "").upper()
-    if reg.startswith("F-GXL"):
+    if is_beluga(rec):
         return "Beluga transport"
-    if reg.startswith("F-GST") or reason.startswith("callsign:BGA") or reason.startswith("callsign:BCO"):
-        return "Beluga transport"
-    if reason.startswith("registration:F-W") or reason.startswith("registration:D-A"):
-        # registration:D-A here only ever means D-AV/D-AX/D-AZ, since those
-        # are the only D-A-prefixed entries in REGISTRATION_PREFIXES -- the
-        # German equivalent of F-W: a pre-delivery test registration at
-        # Hamburg-Finkenwerder, not a permanent operational one.
+    if (rec.get("match_reason") or "").startswith("registration:"):
+        # F-W / D-AV / D-AX / D-AZ: provisional pre-delivery test registrations.
         return "Flight test"
-    if reason.startswith("callsign:AIB"):
-        return "Airbus operation"
     return "Airbus operation"
 
 
-def fallback_model(trip):
-    reg = (trip.get("registration") or "").upper()
-    if reg.startswith("F-GXL"):
+def fallback_model(rec):
+    reg = (rec.get("registration") or "").upper()
+    icao24 = (rec.get("icao24") or "").lower()
+    if reg.startswith("F-GXL") or icao24 in KNOWN_BELUGAXL_ICAO24:
         return "BelugaXL"
     if reg.startswith("F-GST"):
         return "BelugaST"
-    icao24 = (trip.get("icao24") or "").lower()
-    if icao24 in KNOWN_BELUGAXL_ICAO24:
-        return "BelugaXL"
-    return trip.get("model") or "Aircraft"
-
-
-# icao24 hex codes for the current BelugaXL fleet, used as a fallback ONLY
-# when no --registry file was supplied (so trip["registration"] is None) --
-# this lets the model label still say "BelugaXL" instead of the generic
-# "Aircraft" without needing to download OpenSky's full aircraft database
-# just for six known airframes.
-#
-# This is deliberately a set of icao24 codes only, NOT an icao24->registration
-# mapping: which specific tail number (F-GXLH, F-GXLI, F-GXLJ, F-GXLN, F-GXLO,
-# and a sixth) corresponds to which of these hex codes is inconsistently
-# reported across sources at the time this was written, so guessing a specific
-# registration risks mislabeling a real aircraft with the wrong tail number --
-# worse than just not showing one. If you have a confirmed, current
-# icao24->registration mapping for the fleet, add it to a --registry CSV
-# instead (see load_registry) rather than editing this set, and it will take
-# priority over this fallback automatically.
-KNOWN_BELUGAXL_ICAO24 = {
-    "395d67",  # F-GXLH, confirmed
-    "395d68",  # F-GXLI, confirmed
-    "395d69",
-    "395d6d",
-    "395d6e",
-    "395d66",
-}
+    if (rec.get("callsign") or "").upper().startswith(BELUGA_CALLSIGN_PREFIXES):
+        return "Beluga"  # BGA/BCO callsign, but not a known BelugaXL airframe
+    return rec.get("model") or "Aircraft"
 
 
 def fetch_tracks(client, candidates, existing_entry, max_tracks=None):
     """Fetch only candidates that have not already been checked.
 
-    This is deliberately resumable: a rate limit no longer forces us to repeat
-    the expensive airport queries or re-fetch tracks that were already saved.
+    Resumable: a rate limit does not force us to repeat the expensive airport
+    queries or re-fetch tracks that were already saved. Returns
+    (trips, checked_keys, rate_limited, attempts).
     """
+    existing_meta = (existing_entry or {}).get("meta", {})
     existing_trips = {
         trip["id"]: trip
         for trip in (existing_entry or {}).get("trips", [])
         if trip.get("id")
     }
-    candidate_by_id = {f"{c['icao24']}-{c['firstSeen']}": c for c in candidates}
-    for trip_id, trip in existing_trips.items():
-        candidate = candidate_by_id.get(trip_id)
-        if candidate:
-            if not trip.get("model"):
-                trip["model"] = fallback_model(candidate)
-            if not trip.get("purpose"):
-                trip["purpose"] = purpose_for(candidate)
-    checked = set((existing_entry or {}).get("meta", {}).get("checked_candidates", []))
-    trips = list(existing_trips.values())
+    checked = set(existing_meta.get("checked_candidates", []))
+    attempts = dict(existing_meta.get("track_attempts", {}))
     rate_limited = False
-    attempted = 0
+    fetched = 0
 
     pending = [c for c in candidates if c["key"] not in checked and
                f"{c['icao24']}-{c['firstSeen']}" not in existing_trips]
 
     if not pending:
         print("All candidate tracks have already been checked; nothing to fetch.", file=sys.stderr)
-        return trips, checked, False
+        return list(existing_trips.values()), checked, False, attempts
 
     print(
         f"Fetching tracks for {len(pending)} remaining candidate flight(s) "
@@ -514,10 +608,10 @@ def fetch_tracks(client, candidates, existing_entry, max_tracks=None):
     )
 
     for c in pending:
-        if max_tracks is not None and attempted >= max_tracks:
+        if max_tracks is not None and fetched >= max_tracks:
             print(f"Stopping after --max-tracks={max_tracks}; run again to continue.", file=sys.stderr)
             break
-        attempted += 1
+        fetched += 1
         try:
             track = client.track(c["icao24"], c["firstSeen"], debug=True)
         except RateLimitExceeded as e:
@@ -526,11 +620,19 @@ def fetch_tracks(client, candidates, existing_entry, max_tracks=None):
             rate_limited = True
             break
         except Exception as e:
-            # Don't mark transient/server errors as checked: a later run can retry.
-            print(f"  track fetch failed for {c['icao24']} ({c['callsign']}): {e}", file=sys.stderr)
+            # Transient/server error: retry on a later run, but give up after
+            # MAX_TRACK_ATTEMPTS so one bad flight can't keep a date
+            # "incomplete" forever.
+            attempts[c["key"]] = attempts.get(c["key"], 0) + 1
+            print(f"  track fetch failed for {c['icao24']} ({c['callsign']}), "
+                  f"attempt {attempts[c['key']]}/{MAX_TRACK_ATTEMPTS}: {e}", file=sys.stderr)
+            if attempts[c["key"]] >= MAX_TRACK_ATTEMPTS:
+                print("    giving up on this flight.", file=sys.stderr)
+                checked.add(c["key"])
             continue
 
         checked.add(c["key"])
+        attempts.pop(c["key"], None)
         if not track or not track.get("path"):
             print(
                 f"  no track data for {c['icao24']} ({c['callsign']}, {c['site']})",
@@ -550,11 +652,24 @@ def fetch_tracks(client, candidates, existing_entry, max_tracks=None):
                 file=sys.stderr,
             )
             continue
+        if path_extent_km(path) < MIN_FLIGHT_EXTENT_KM:
+            print(
+                f"  track for {c['icao24']} ({c['callsign']}) never leaves a "
+                f"{MIN_FLIGHT_EXTENT_KM:g} km radius -- ground movement, skipped",
+                file=sys.stderr,
+            )
+            continue
 
+        # Sites: what the flight record said, plus any airport the flown
+        # track actually starts or ends at (robust to missing estimates).
+        sites = merge_sites(c.get("sites") or [c["site"]],
+                            sites_near(path[0][1], path[0][2]),
+                            sites_near(path[-1][1], path[-1][2]))
         trip_id = f"{c['icao24']}-{c['firstSeen']}"
         existing_trips[trip_id] = {
             "id": trip_id,
-            "site": c["site"],
+            "site": sites[0],
+            "sites": sites,
             "icao24": c["icao24"],
             "callsign": c["callsign"],
             "registration": c["registration"],
@@ -563,77 +678,108 @@ def fetch_tracks(client, candidates, existing_entry, max_tracks=None):
             "match_reason": c["match_reason"],
             "path": path,
         }
-        trips = list(existing_trips.values())
 
-    return trips, checked, rate_limited
+    return list(existing_trips.values()), checked, rate_limited, attempts
 
 
-def build_real(date_str, registry_csv, existing_entry=None, max_tracks=None):
+def make_client():
     client = OpenSkyClient()
     if not client.authenticated:
-        print(
-            "ERROR: OPENSKY_CLIENT_ID / OPENSKY_CLIENT_SECRET not set.",
-            file=sys.stderr,
-        )
+        print("ERROR: OPENSKY_CLIENT_ID / OPENSKY_CLIENT_SECRET not set.", file=sys.stderr)
         sys.exit(1)
+    return client
 
+
+def fetch_date(client, date_str, registry, existing_entry=None, max_tracks=None):
+    """Fetch (or resume / refresh) one UTC date. Returns (trips, meta).
+
+    Shared by fetch_day.py and fetch_week.py so both behave identically.
+    """
     existing_meta = (existing_entry or {}).get("meta", {})
     candidates = existing_meta.get("candidates")
-    registry = load_registry(registry_csv)
+    checked_before = set(existing_meta.get("checked_candidates", []))
+    fetched_at = existing_meta.get("candidates_fetched_at")
+    day_end = day_bounds_utc(date_str)[1]
 
-    # Cache the candidate list in the store. Airport flight queries are only
-    # needed once per date; subsequent runs concentrate exclusively on tracks.
+    def is_settled(ts):
+        return ts is not None and ts >= day_end + CANDIDATE_SETTLE_HOURS * 3600
+
     flights_rate_limited = False
-    if candidates is None:
+    if candidates is None or not is_settled(fetched_at):
+        # First look at this date, or a look taken before OpenSky's nightly
+        # processing had settled -- (re)query the airports and merge.
         try:
-            candidates = find_candidates(client, date_str, registry)
+            fresh = find_candidates(client, date_str, registry)
         except RateLimitExceeded as e:
             print(f"\n{e}", file=sys.stderr)
             client.print_credit_status(prefix="  ")
-            print(
-                f"Can't find candidates for {date_str} -- the flights/* credit "
-                "bucket is exhausted. Re-run this date later once it resets.",
-                file=sys.stderr,
-            )
-            candidates = []
-            flights_rate_limited = True
+            print(f"Can't query flights for {date_str} -- the flights/* credit "
+                  "bucket is exhausted. Re-run this date later once it resets.",
+                  file=sys.stderr)
+            flights_rate_limited = candidates is None
+            candidates = candidates or []
         else:
+            merged = {c["key"]: c for c in (candidates or [])}
+            merged.update({c["key"]: c for c in fresh})
+            for c in merged.values():
+                c.setdefault("sites", [c["site"]])
+            candidates = dedupe_candidates(list(merged.values()), prefer_keys=checked_before)
+            fetched_at = int(time.time())
             print_candidates(candidates)
     else:
-        # Older cached runs may pre-date model metadata. Enrich them locally
-        # when a registry is supplied without repeating any OpenSky API calls.
+        # Enrich cached candidates locally when a registry is supplied.
         for c in candidates:
             aircraft = registry.get(c.get("icao24"), {})
             if not c.get("registration"):
                 c["registration"] = aircraft.get("registration")
             if not c.get("model"):
                 c["model"] = aircraft.get("model")
-        print(
-            f"Resuming {date_str}: using {len(candidates)} cached candidate "
-            "flight(s); skipping airport API queries.",
-            file=sys.stderr,
-        )
+        print(f"Resuming {date_str}: using {len(candidates)} settled cached "
+              "candidate flight(s); skipping airport API queries.", file=sys.stderr)
         print_candidates(candidates)
 
     if flights_rate_limited:
         trips = list((existing_entry or {}).get("trips", []))
-        checked = set((existing_entry or {}).get("meta", {}).get("checked_candidates", []))
+        checked = checked_before
+        attempts = dict(existing_meta.get("track_attempts", {}))
         rate_limited = True
     else:
-        trips, checked, rate_limited = fetch_tracks(
-            client, candidates, existing_entry, max_tracks=max_tracks
-        )
-    complete = len(checked) >= len(candidates) and not rate_limited
+        trips, checked, rate_limited, attempts = fetch_tracks(
+            client, candidates, existing_entry, max_tracks=max_tracks)
+
+    trip_ids = {t["id"] for t in trips}
+    remaining = [c for c in candidates
+                 if c["key"] not in checked and f"{c['icao24']}-{c['firstSeen']}" not in trip_ids]
     meta = {
         "date": date_str,
         "synthetic": False,
         "candidates": candidates,
         "checked_candidates": sorted(checked),
-        "complete": complete,
+        "candidates_fetched_at": fetched_at,
+        "settled": is_settled(fetched_at),
+        "complete": (not remaining) and not rate_limited and fetched_at is not None,
     }
+    if attempts:
+        meta["track_attempts"] = attempts
     if rate_limited:
         meta["incomplete_rate_limited"] = True
     return trips, meta
+
+
+def needs_revisit(entry):
+    """True if a stored date still has work to do (unfinished tracks, or a
+    candidate list taken before OpenSky's data had settled)."""
+    meta = (entry or {}).get("meta", {})
+    if meta.get("synthetic"):
+        return False
+    return (not meta.get("complete", False)) or (not meta.get("settled", False))
+
+
+def build_real(date_str, registry_csv, existing_entry=None, max_tracks=None):
+    client = make_client()
+    registry = load_registry(registry_csv)
+    return fetch_date(client, date_str, registry, existing_entry, max_tracks)
+
 
 def build_synthetic(date_str):
     random.seed(date_str)
@@ -660,6 +806,7 @@ def build_synthetic(date_str):
             trips.append({
                 "id": f"SYN-{site}-{date_str}-{i:03d}",
                 "site": site,
+                "sites": [site],
                 "icao24": f"synth{i:02x}{site.lower()}",
                 "callsign": f"AIB{i:04d}"[:8],
                 "registration": "F-WSYN" if i % 2 == 0 else "F-WTST",
@@ -672,6 +819,58 @@ def build_synthetic(date_str):
                    "note": "Placeholder data for testing. Not real flights."}
 
 
+def normalize_store(store):
+    """Idempotent clean-up applied every time the store is loaded. Returns the
+    number of changes made. It repairs data written by earlier versions:
+
+      * flights between TLS and XFW appeared on only one map (or twice in the
+        totals): every trip now lists all sites it touches, judged from where
+        the flown track starts/ends, and near-identical records are merged
+        (also across midnight, where a flight shows up under two dates);
+      * ground-only "flights" (engine runs) are dropped;
+      * generic model labels are upgraded (Beluga callsigns etc.).
+    """
+    changes = 0
+    kept_by_icao = {}  # icao24 -> list of kept trips, for cross-date de-duplication
+    for date in sorted(store.get("days", {})):
+        entry = store["days"][date]
+        kept = []
+        for trip in entry.get("trips", []):
+            path = trip.get("path") or []
+            if len(path) < 2 or path_extent_km(path) < MIN_FLIGHT_EXTENT_KM:
+                changes += 1
+                continue
+
+            sites = merge_sites(trip.get("sites") or [trip.get("site")],
+                                sites_near(path[0][1], path[0][2]),
+                                sites_near(path[-1][1], path[-1][2]))
+            if sites != trip.get("sites") or sites[0] != trip.get("site"):
+                trip["sites"], trip["site"] = sites, sites[0]
+                changes += 1
+
+            if trip.get("model") in (None, "", "Aircraft"):
+                better = fallback_model(trip)
+                if better != trip.get("model"):
+                    trip["model"] = better
+                    changes += 1
+            if not trip.get("purpose"):
+                trip["purpose"] = purpose_for(trip)
+                changes += 1
+
+            start = path[0][0]
+            twin = next((o for o in kept_by_icao.get(trip.get("icao24"), [])
+                         if abs(o["path"][0][0] - start) <= DUPLICATE_WINDOW_SECONDS), None)
+            if twin is not None:
+                twin["sites"] = merge_sites(twin.get("sites"), trip["sites"])
+                twin["site"] = twin["sites"][0]
+                changes += 1
+                continue
+            kept_by_icao.setdefault(trip.get("icao24"), []).append(trip)
+            kept.append(trip)
+        entry["trips"] = kept
+    return changes
+
+
 def load_store(path):
     """Load the central store file, or return an empty one if it doesn't exist yet."""
     if not os.path.exists(path):
@@ -680,39 +879,37 @@ def load_store(path):
         store = json.load(f)
     store.setdefault("airports", AIRPORTS)
     store.setdefault("days", {})
+    n = normalize_store(store)
+    if n:
+        print(f"  (store clean-up: {n} change(s) applied while loading {path})", file=sys.stderr)
     return store
 
 
 def save_store(store, path):
+    """Atomic write: a crash mid-write can no longer leave a truncated store."""
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w") as f:
+    tmp = f"{path}.tmp"
+    with open(tmp, "w") as f:
         json.dump(store, f, separators=(",", ":"))
+    os.replace(tmp, path)
 
 
 def prune_store(store, keep_days, reference_date=None):
-    """Keep only the `keep_days` most recent dates in the store, counting
-    back from `reference_date` (default: today, UTC). Returns the list of
-    dates that were dropped.
+    """Keep only dates within the last `keep_days` days counting back from
+    `reference_date` (default: today, UTC). Returns the dropped dates.
 
-    This is what makes the store a rolling window: every successful fetch
-    run trims anything older than `keep_days` back from the reference date,
-    so the store never grows unbounded and always reflects "the last N
-    days" relative to whatever date you just fetched up to -- not
-    necessarily wall-clock "today" (e.g. fetch_week.py passes its --end
-    date, so pruning stays consistent with the range that was just fetched
-    even if --end wasn't today).
+    The cut-off is calendar based, so stale dates are dropped even when the
+    store holds fewer than `keep_days` entries (e.g. after missed runs).
     """
     if keep_days is None:
-        return []
-    all_dates = sorted(store.get("days", {}).keys())
-    if len(all_dates) <= keep_days:
         return []
     if reference_date is None:
         ref = datetime.now(timezone.utc).date()
     else:
         ref = datetime.strptime(reference_date, "%Y-%m-%d").date()
     cutoff = ref - timedelta(days=keep_days - 1)
-    dropped = [d for d in all_dates if datetime.strptime(d, "%Y-%m-%d").date() < cutoff]
+    dropped = [d for d in sorted(store.get("days", {}))
+               if datetime.strptime(d, "%Y-%m-%d").date() < cutoff]
     for d in dropped:
         del store["days"][d]
     return dropped
@@ -736,8 +933,39 @@ def list_store(path):
             flags.append("INCOMPLETE (rate limited)")
         elif meta.get("complete") is False:
             flags.append("INCOMPLETE")
+        if not meta.get("synthetic") and not meta.get("settled", False):
+            flags.append("UNSETTLED (will be re-queried by --revisit)")
         flag_str = f"  [{', '.join(flags)}]" if flags else ""
         print(f"  {date}: {n_trips} trip(s){flag_str}")
+
+
+def revisit(store_path, registry_csv, max_tracks, limit, keep_days):
+    """Finish / refresh stored dates that need it, oldest first, at most
+    `limit` dates per run (so today's fresh fetch keeps its credits)."""
+    store = load_store(store_path)
+    today = datetime.now(timezone.utc).date()
+    todo = sorted(
+        d for d, e in store["days"].items()
+        if needs_revisit(e) and (today - datetime.strptime(d, "%Y-%m-%d").date()).days <= 28
+    )[:limit]
+    if not todo:
+        print("Nothing to revisit: every stored date is complete and settled.", file=sys.stderr)
+        return
+    print(f"Revisiting: {', '.join(todo)}", file=sys.stderr)
+    client = make_client()
+    registry = load_registry(registry_csv)
+    for d in todo:
+        trips, meta = fetch_date(client, d, registry, store["days"].get(d), max_tracks)
+        store["days"][d] = {"meta": meta, "trips": trips}
+        save_store(store, store_path)
+        state = ("rate limited" if meta.get("incomplete_rate_limited")
+                 else "complete" if meta.get("complete") else "still incomplete")
+        print(f"  {d}: {len(trips)} trip(s) [{state}]", file=sys.stderr)
+        if meta.get("incomplete_rate_limited"):
+            break
+    dropped = prune_store(store, keep_days)
+    if dropped:
+        save_store(store, store_path)
 
 
 def main():
@@ -759,6 +987,11 @@ def main():
     ap.add_argument("--max-tracks", type=int, metavar="N",
                      help="Fetch at most N new tracks this run. Useful for deliberately "
                           "spreading a date across quota windows; later runs resume automatically.")
+    ap.add_argument("--revisit", action="store_true",
+                     help="Finish incomplete dates and re-query dates whose airport "
+                          "lists were taken before OpenSky's data settled, then exit.")
+    ap.add_argument("--revisit-limit", type=int, default=2, metavar="N",
+                     help="Max dates to revisit per run (default 2).")
     ap.add_argument("--keep-days", type=int, metavar="N", default=None,
                      help="After saving, drop any stored date older than N days ago (by "
                           "calendar date), keeping the store as a rolling N-day window. "
@@ -767,6 +1000,10 @@ def main():
 
     if args.list:
         list_store(args.output)
+        return
+
+    if args.revisit:
+        revisit(args.output, args.registry, args.max_tracks, args.revisit_limit, args.keep_days)
         return
 
     if not args.date:
@@ -811,7 +1048,7 @@ def main():
         )
     elif not meta.get("synthetic") and not meta.get("complete", True):
         print(
-            f"NOTE: {args.date} is intentionally incomplete; run the same command again "
+            f"NOTE: {args.date} is incomplete; run the same command again "
             "to continue from where it stopped.",
             file=sys.stderr,
         )

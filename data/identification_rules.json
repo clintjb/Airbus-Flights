@@ -15,7 +15,7 @@
     {
       "prefix": "F-GXL",
       "label": "BelugaXL registration block",
-      "notes": "The six BelugaXL (A330-743L) aircraft, e.g. F-GXLG (final one delivered). Same rationale as F-GST -- permanently registered, not F-W."
+      "notes": "The six BelugaXL (A330-743L) aircraft, F-GXLG to F-GXLO (F-GXLO was the sixth and last delivered). Same rationale as F-GST -- permanently registered, not F-W."
     },
     {
       "prefix": "D-AV",
@@ -73,14 +73,13 @@
     {"reg": "F-GSTC", "type": "A300-600ST Beluga", "role": "Beluga #3"},
     {"reg": "F-GSTD", "type": "A300-600ST Beluga", "role": "Beluga #4"},
     {"reg": "F-GSTF", "type": "A300-600ST Beluga", "role": "Beluga #5"},
-	{"reg": "F-GXLG", "type": "A330-743L BelugaXL", "role": "BelugaXL #1 -- test airframe; entered service May 2024"},
+    {"reg": "F-GXLG", "type": "A330-743L BelugaXL", "role": "BelugaXL #1 -- test airframe; entered service May 2024"},
     {"reg": "F-GXLH", "type": "A330-743L BelugaXL", "role": "BelugaXL #2 -- active service"},
     {"reg": "F-GXLI", "type": "A330-743L BelugaXL", "role": "BelugaXL #3 -- active service"},
     {"reg": "F-GXLJ", "type": "A330-743L BelugaXL", "role": "BelugaXL #4 -- active service"},
     {"reg": "F-GXLN", "type": "A330-743L BelugaXL", "role": "BelugaXL #5 -- active service"},
     {"reg": "F-GXLO", "type": "A330-743L BelugaXL", "role": "BelugaXL #6 -- active service"}
   ],
-  
 
   "exclusions": {
     "airports_only": ["LFBO", "EDHI"],
