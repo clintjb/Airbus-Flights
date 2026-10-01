@@ -16,6 +16,9 @@ jobs:
   update:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      OPENSKY_CLIENT_ID: ${{ secrets.OPENSKY_CLIENT_ID }}
+      OPENSKY_CLIENT_SECRET: ${{ secrets.OPENSKY_CLIENT_SECRET }}
     steps:
       - name: Check out repo
         uses: actions/checkout@v6
@@ -27,51 +30,59 @@ jobs:
 
       - name: Compute yesterday's UTC date
         id: date
-        run: echo "value=$(date -u -d 'yesterday' +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
-
-      - name: Retry any previously incomplete date still in the window
-        env:
-          OPENSKY_CLIENT_ID: ${{ secrets.OPENSKY_CLIENT_ID }}
-          OPENSKY_CLIENT_SECRET: ${{ secrets.OPENSKY_CLIENT_SECRET }}
         run: |
-          python3 - <<'EOF'
-          import json, os, subprocess, sys
-          store_path = "data/store.json"
-          if not os.path.exists(store_path):
-              sys.exit(0)  # first-ever run, nothing to retry yet
-          with open(store_path) as f:
-              store = json.load(f)
-          incomplete = [
-              date for date, entry in store.get("days", {}).items()
-              if entry.get("meta", {}).get("incomplete_rate_limited")
-          ]
-          if not incomplete:
-              print("No incomplete dates to retry.")
-              sys.exit(0)
-          # Retry the single oldest incomplete date only, once per day: since
-          # a rate limit stops the whole day's fetch, only one date is ever
-          # likely to be incomplete at a time in normal use, and retrying
-          # more than one risks spending today's fresh credits before
-          # yesterday's actual fetch (the step right after this one) gets a
-          # turn. A retry re-uses the date's cached candidates -- no
-          # /flights/* calls, just whichever /tracks/all calls didn't
-          # complete last time.
-          retry_date = sorted(incomplete)[0]
-          print(f"Retrying incomplete date: {retry_date}")
-          subprocess.run(
-              ["python3", "fetch_day.py", retry_date, "-o", store_path],
-              check=True,
-          )
-          EOF
+          echo "value=$(date -u -d 'yesterday' +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+          echo "month=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
+
+      # Registration matching (F-W..., D-AV/D-AX/D-AZ...) needs OpenSky's
+      # aircraft database. Without it only callsigns can be matched, which
+      # misses Hamburg-Finkenwerder test/delivery flights that fly without an
+      # AIB callsign. Cached per month; if the download fails the run
+      # carries on with callsign-only matching rather than failing.
+      - name: Cache OpenSky aircraft database
+        id: registry-cache
+        uses: actions/cache@v4
+        with:
+          path: aircraftDatabase.csv
+          key: opensky-aircraft-db-${{ steps.date.outputs.month }}
+          restore-keys: |
+            opensky-aircraft-db-
+
+      - name: Download OpenSky aircraft database
+        if: steps.registry-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        run: |
+          # Only on a cache miss (about once a month). Written to a temp file
+          # first, so a failed download leaves any older cached copy intact.
+          curl -fL --retry 3 --retry-delay 5 -o aircraftDatabase.csv.tmp \
+            https://s3.opensky-network.org/data-samples/metadata/aircraftDatabase.csv
+          mv aircraftDatabase.csv.tmp aircraftDatabase.csv
+          wc -l aircraftDatabase.csv
+
+      - name: Pick registry option
+        id: regopt
+        run: |
+          if [ -s aircraftDatabase.csv ]; then
+            echo "args=--registry aircraftDatabase.csv" >> "$GITHUB_OUTPUT"
+          else
+            echo "WARNING: no aircraft database available; matching on callsigns only."
+            echo "args=" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Finish earlier dates that are incomplete (rate limit OR transient
+      # errors) and re-query dates whose airport list was taken before
+      # OpenSky's data had settled. At most 2 dates per run so that
+      # yesterday's fetch below still has credits left.
+      - name: Revisit unfinished / unsettled dates
+        run: |
+          python3 fetch_day.py --revisit --revisit-limit 2 \
+            -o data/store.json --keep-days 14 ${{ steps.regopt.outputs.args }}
 
       - name: Fetch yesterday and prune to a 14-day window
-        env:
-          OPENSKY_CLIENT_ID: ${{ secrets.OPENSKY_CLIENT_ID }}
-          OPENSKY_CLIENT_SECRET: ${{ secrets.OPENSKY_CLIENT_SECRET }}
         run: |
           python3 fetch_day.py "${{ steps.date.outputs.value }}" \
             -o data/store.json \
-            --keep-days 14
+            --keep-days 14 ${{ steps.regopt.outputs.args }}
 
       - name: Build the embeddable fragment
         run: |
@@ -83,61 +94,52 @@ jobs:
         env:
           FETCHED_DATE: ${{ steps.date.outputs.value }}
         run: |
-          python3 - <<'EOF'
+          python3 - <<'PY'
           import json, os, sys
           fetched_date = os.environ["FETCHED_DATE"]
           with open("data/store.json") as f:
               store = json.load(f)
           days = store.get("days", {})
           total_trips = sum(len(d.get("trips", [])) for d in days.values())
-          incomplete = [
+          unfinished = sorted(
               date for date, entry in days.items()
-              if entry.get("meta", {}).get("incomplete_rate_limited")
-          ]
+              if not entry.get("meta", {}).get("complete", True)
+          )
           print(f"Store has {len(days)} date(s), {total_trips} trip(s) total.")
           print(f"This run fetched: {fetched_date}")
-          if incomplete:
+          if unfinished:
               print(
-                  f"NOTE: {len(incomplete)} date(s) hit a credit limit and are "
-                  f"incomplete: {', '.join(sorted(incomplete))}. This is common "
-                  "if OpenSky's daily credits for this account were already "
-                  "partly used today (manual testing, another run, etc.) -- it "
-                  "does not block committing; an incomplete date keeps filling "
-                  "in on a future run for as long as it stays inside the "
-                  "14-day window."
+                  f"NOTE: {len(unfinished)} date(s) are not yet complete "
+                  f"({', '.join(unfinished)}) -- rate limit or transient API "
+                  "errors. This does not block committing; the next run's "
+                  "revisit step keeps filling them in while they stay inside "
+                  "the 14-day window."
               )
           if len(days) == 0:
               sys.exit("Store is empty -- refusing to commit.")
-          if fetched_date in incomplete and total_trips == 0:
-              sys.exit(
-                  f"Today's fetch ({fetched_date}) was credit-limited and the "
-                  "whole store has zero trips -- can't tell a genuinely quiet "
-                  "stretch apart from an exhausted account yet. Refusing to "
-                  "commit; try again after credits reset."
-              )
+          if fetched_date not in days:
+              sys.exit(f"{fetched_date} is missing from the store -- refusing to commit.")
           if total_trips == 0:
               total_candidates = sum(
                   len(d.get("meta", {}).get("candidates") or [])
                   for d in days.values()
               )
-              if total_candidates == 0:
-                  # The airport queries succeeded and simply found no
-                  # matching flights (e.g. a weekend, or a store that only
-                  # holds one quiet day so far). That's a real result, not
-                  # a failure -- commit it.
-                  print(
-                      "No matching flights found in any stored date, and no "
-                      "credit limit was hit -- treating this as a genuinely "
-                      "quiet stretch and committing."
-                  )
-              else:
+              if fetched_date in unfinished and total_candidates == 0:
                   sys.exit(
-                      f"{total_candidates} candidate flight(s) were matched "
-                      "but none produced a track -- likely a track-fetch "
-                      "problem rather than a quiet stretch. Refusing to "
-                      "commit; check the fetch step's logs above."
+                      f"{fetched_date} could not be queried (credit limit) and "
+                      "the store has zero trips -- can't tell a quiet stretch "
+                      "from an exhausted account. Refusing to commit; try "
+                      "again after credits reset."
                   )
-          EOF
+              if total_candidates:
+                  sys.exit(
+                      f"{total_candidates} candidate flight(s) matched but none "
+                      "produced a track -- likely a track-fetch problem. "
+                      "Refusing to commit; check the fetch step's logs."
+                  )
+              print("No matching flights in any stored date -- treating as a "
+                    "genuinely quiet stretch and committing.")
+          PY
 
       - name: Commit updated data and fragment
         env:
@@ -149,7 +151,7 @@ jobs:
           if git diff --cached --quiet; then
             echo "No changes (store and fragment already up to date)."
           else
-            git commit -m "Add ${FETCHED_DATE} to Airbus test flights (rolling 14-day window)"
+            git commit -m "Add ${FETCHED_DATE} to Airbus Flights Data"
             git push
           fi
 
@@ -157,8 +159,9 @@ jobs:
         env:
           PERSONAL_ACCESS_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
         run: |
-          git clone https://x-access-token:${PERSONAL_ACCESS_TOKEN}@github.com/clintjb/clintjb.github.io.git target_repo
+          git clone --depth 1 "https://x-access-token:${PERSONAL_ACCESS_TOKEN}@github.com/clintjb/clintjb.github.io.git" target_repo
 
+          mkdir -p target_repo/_includes
           cp fragment.html target_repo/_includes/airbus_test_flights.html
 
           cd target_repo
