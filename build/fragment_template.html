@@ -374,7 +374,7 @@
 
         ctx.beginPath();
         let started = false;
-        const trailWindow = Math.max(480, speed * 60 * 3); // keep ~3s of real-time trail visible at any speed
+        const trailWindow = Math.max(480, speed * nightMult(simTime) * 60 * 3); // keep ~3s of real-time trail visible at any speed
         for (const [t, plat, plon] of path) {
           if (t > simTime) break;
           if (t < simTime - trailWindow) continue;
@@ -430,12 +430,19 @@
     }).observe(root);
   }
 
+  // No flights run 22:00-07:00 (clock time), so play those hours 3x faster.
+  const NIGHT_START = 22 * 3600, NIGHT_END = 7 * 3600, NIGHT_MULT = 3;
+  function nightMult(t) {
+    const sod = ((t % 86400) + 86400) % 86400;
+    return (sod >= NIGHT_START || sod < NIGHT_END) ? NIGHT_MULT : 1;
+  }
+
   function tick(ts) {
     if (!onScreen) { lastFrame = null; requestAnimationFrame(tick); return; }
     if (playing) {
       if (lastFrame != null) {
         const dt = (ts - lastFrame) / 1000;
-        simTime += dt * speed * 60;
+        simTime += dt * speed * nightMult(simTime) * 60;
         if (simTime > rangeSeconds) simTime -= rangeSeconds;
       }
       lastFrame = ts;
